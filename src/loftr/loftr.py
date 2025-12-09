@@ -86,7 +86,8 @@ class LoFTR(nn.Module):
         if 'mask0' in data:
             mask_c0, mask_c1 = data['mask0'], data['mask1']
 
-        feat_c0, feat_c1 = self.loftr_coarse(feat_c0, feat_c1, mask_c0, mask_c1)
+        feat_c0, feat_c1 = self.loftr_coarse(feat_c0, feat_c1, mask0=mask_c0, mask1=mask_c1, data=data)
+
 
         feat_c0 = rearrange(feat_c0, 'n c h w -> n (h w) c')
         feat_c1 = rearrange(feat_c1, 'n c h w -> n (h w) c')

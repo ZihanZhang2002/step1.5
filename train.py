@@ -23,8 +23,9 @@ loguru_logger = get_rank_zero_only_logger(loguru_logger)
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:1024"
 
+
 def parse_args():
-    # init a costum parser which will be added into pl.Trainer parser
+    # init a custom parser which will be added into pl.Trainer parser
     # check documentation: https://pytorch-lightning.readthedocs.io/en/latest/common/trainer.html#trainer-flags
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
@@ -64,10 +65,12 @@ def parse_args():
     parser = pl.Trainer.add_argparse_args(parser)
     return parser.parse_args()
 
+
 def inplace_relu(m):
     classname = m.__class__.__name__
     if classname.find('ReLU') != -1:
-        m.inplace=True
+        m.inplace = True
+
 
 def main():
     # parse arguments
@@ -80,10 +83,10 @@ def main():
     config = get_cfg_default()
     config.merge_from_file(args.main_cfg_path)
     config.merge_from_file(args.data_cfg_path)
-    
+
     if config.LOFTR.COARSE.NPE is None:
         config.LOFTR.COARSE.NPE = [832, 832, 832, 832]  # training at 832 resolution on MegaDepth datasets
-    
+
     if args.deter:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -91,7 +94,7 @@ def main():
     pl.seed_everything(config.TRAINER.SEED)  # reproducibility
     # TODO: Use different seeds for each dataloader workers
     # This is needed for data augmentation
-    
+
     # scale lr and warmup-step automatically
     args.gpus = _n_gpus = setup_gpus(args.gpus)
     config.TRAINER.WORLD_SIZE = _n_gpus * args.num_nodes
@@ -121,10 +124,15 @@ def main():
 
     # Callbacks
     # TODO: update ModelCheckpoint to monitor multiple metrics
-    ckpt_callback = ModelCheckpoint(monitor='auc@10', verbose=True, save_top_k=5, mode='max',
-                                    save_last=True,
-                                    dirpath=str(ckpt_dir),
-                                    filename='{epoch}-{auc@5:.3f}-{auc@10:.3f}-{auc@20:.3f}')
+    ckpt_callback = ModelCheckpoint(
+        monitor='auc@10',
+        verbose=True,
+        save_top_k=5,
+        mode='max',
+        save_last=True,
+        dirpath=str(ckpt_dir),
+        filename='{epoch}-{auc@5:.3f}-{auc@10:.3f}-{auc@20:.3f}'
+    )
     lr_monitor = LearningRateMonitor(logging_interval='step')
     callbacks = [lr_monitor]
     if not args.disable_ckpt:
@@ -133,9 +141,14 @@ def main():
     # Lightning Trainer
     trainer = pl.Trainer.from_argparse_args(
         args,
-        plugins=[DDPPlugin(find_unused_parameters=False,
-                          num_nodes=args.num_nodes,
-                          sync_batchnorm=config.TRAINER.WORLD_SIZE > 0), NativeMixedPrecisionPlugin()],
+        plugins=[
+            DDPPlugin(
+                find_unused_parameters=True,  # <- 为 random-exit 打开 unused params 处理
+                num_nodes=args.num_nodes,
+                sync_batchnorm=config.TRAINER.WORLD_SIZE > 0
+            ),
+            NativeMixedPrecisionPlugin()
+        ],
         gradient_clip_val=config.TRAINER.GRADIENT_CLIPPING,
         callbacks=callbacks,
         logger=logger,
@@ -143,7 +156,8 @@ def main():
         replace_sampler_ddp=False,  # use custom sampler
         reload_dataloaders_every_epoch=False,  # avoid repeated samples!
         weights_summary='full',
-        profiler=profiler)
+        profiler=profiler
+    )
     loguru_logger.info(f"Trainer initialized!")
     loguru_logger.info(f"Start training!")
 

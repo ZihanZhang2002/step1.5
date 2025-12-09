@@ -27,6 +27,12 @@ _CN.LOFTR.COARSE.AGG_SIZE1 = 4
 _CN.LOFTR.COARSE.NO_FLASH = False
 _CN.LOFTR.COARSE.ROPE = True
 _CN.LOFTR.COARSE.NPE = None # [832, 832, long_side, long_side] Suggest setting based on the long side of the input image, especially when the long_side > 832
+_CN.LOFTR.COARSE.RANDOM_EXIT = False
+# random-exit settings (coarse transformer)
+_CN.LOFTR.COARSE.EXIT_ON_CROSS_ONLY = True   # 只允许在 cross-attention 之后退出
+_CN.LOFTR.COARSE.EXIT_MIN_BLOCK = 0          # 最早可以退出的 cross-block index（0 对应第一对 self+cross）
+_CN.LOFTR.COARSE.EXIT_MAX_BLOCK = -1         # -1 表示“用最后一个 cross-block”，实际代码里会根据层数解析
+_CN.LOFTR.COARSE.SAVE_ALL_LAYERS = False     # 是否在前向过程中缓存所有层输出（离线打标签时再打开）
 
 # 3. Coarse-Matching config
 _CN.LOFTR.MATCH_COARSE = CN()

@@ -28,6 +28,12 @@ cfg.LOFTR.COARSE.NO_FLASH = True # Not use Flash-Attention just for reproducing 
 cfg.LOFTR.MATCH_COARSE.THR = 0.2 # recommend 0.2 for full model and 25 for optimized model
 cfg.LOFTR.MATCH_FINE.LOCAL_REGRESS_TEMPERATURE = 10.0
 cfg.LOFTR.MATCH_FINE.LOCAL_REGRESS_SLICEDIM = 8
+# random-exit (coarse transformer) for Stage-1 teacher
+cfg.LOFTR.COARSE.RANDOM_EXIT = True          # 开启 random-exit 训练
+cfg.LOFTR.COARSE.EXIT_ON_CROSS_ONLY = True   # 只在 cross-attention 后退出
+cfg.LOFTR.COARSE.EXIT_MIN_BLOCK = 0          # 最早从第 0 个 cross-block 就可以退出
+cfg.LOFTR.COARSE.EXIT_MAX_BLOCK = 3          # 最多到第 3 个 cross-block（因为 ['self','cross']*4 一共 4 个 block）
+cfg.LOFTR.COARSE.SAVE_ALL_LAYERS = False     # 先不存所有层，Stage1 只训练 teacher；打标签时再开
 
 # dataset config
 cfg.DATASET.FP16 = False
