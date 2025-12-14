@@ -7,7 +7,7 @@ from einops.einops import rearrange
 from collections import OrderedDict
 from ..utils.position_encoding import RoPEPositionEncodingSine
 import numpy as np
-from loguru import logger    
+from loguru import logger
 
 
 class AG_RoPE_EncoderLayer(nn.Module):
@@ -112,7 +112,9 @@ class AG_RoPE_EncoderLayer(nn.Module):
 
 
 class LocalFeatureTransformer(nn.Module):
-    """A Local Feature Transformer (LoFTR) module with random-exit on cross-attention."""
+    """A Local Feature Transformer (LoFTR) module with random-exit on cross-attention
+    + optional forced-exit for offline label dumping.
+    """
 
     def __init__(self, config):
         super(LocalFeatureTransformer, self).__init__()
@@ -150,7 +152,7 @@ class LocalFeatureTransformer(nn.Module):
         cross_layer = AG_RoPE_EncoderLayer(
             coarse_cfg['d_model'], coarse_cfg['nhead'],
             coarse_cfg['agg_size0'], coarse_cfg['agg_size1'],
-            coarse_cfg['no_flash'], False,
+            coarse_cfg['no_flash'], False,          # cross-attn 不加 RoPE
             coarse_cfg['npe'], self.fp32
         )
         self.layers = nn.ModuleList(
@@ -165,8 +167,7 @@ class LocalFeatureTransformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def _sample_exit_layer_idx(self, feat0_device):
-        """
-        根据配置，在 cross-block 上随机采样一个退出层（只在训练 + random_exit 时使用）。
+        """在 cross-block 上随机采样一个退出层（只在训练 + random_exit 时使用）。
         返回：exit_layer_idx, exit_block_idx（若不启用 random-exit，则都为 None）
         """
         if not (self.training and self.random_exit and self.num_blocks > 0):
@@ -191,6 +192,27 @@ class LocalFeatureTransformer(nn.Module):
         exit_layer_idx = self.cross_layer_indices[block_idx]
         return exit_layer_idx, block_idx
 
+    def _parse_force_exit_from_data(self, data):
+        """从 data['force_exit_block_idx'] 里解析出强制退出的 block / layer index（若存在）。"""
+        if data is None:
+            return None, None
+        if 'force_exit_block_idx' not in data:
+            return None, None
+
+        if self.num_blocks == 0:
+            return None, None
+
+        val = data['force_exit_block_idx']
+        if isinstance(val, torch.Tensor):
+            val = int(val.detach().cpu().item())
+        else:
+            val = int(val)
+
+        # clamp 到合法范围
+        block_idx = max(0, min(self.num_blocks - 1, val))
+        layer_idx = self.cross_layer_indices[block_idx]
+        return layer_idx, block_idx
+
     def forward(self, feat0, feat1, mask0=None, mask1=None, data=None):
         """
         Args:
@@ -198,12 +220,27 @@ class LocalFeatureTransformer(nn.Module):
             feat1 (torch.Tensor): [N, C, H, W]
             mask0 (torch.Tensor): [N, H, W] (optional)
             mask1 (torch.Tensor): [N, H, W] (optional)
+
+        data (dict, optional):
+            - 在 Stage-1 训练：正常不需要额外字段
+            - 在 Stage-1.5 离线打标签：
+                * 可以设置 data['force_exit_block_idx'] = k （0-based block index）
+                  强制在第 k 个 cross-block 后退出
         """
         H0, W0, H1, W1 = feat0.size(-2), feat0.size(-1), feat1.size(-2), feat1.size(-1)
         bs = feat0.shape[0]
 
-        # 决定这次前向的退出层（只在训练 + random_exit 时生效）
+        # ====== 0. 解析「强制退出 block」配置（离线打标签用） ======
+        force_exit_layer_idx, force_exit_block_idx = self._parse_force_exit_from_data(data)
+
+        # ====== 1. 决定这次前向的退出层 ======
+        # 默认情况下：训练 + random_exit 时，从 cross-block 里采样一个退出层
         exit_layer_idx, exit_block_idx = self._sample_exit_layer_idx(feat0.device)
+
+        # 若 data 里指定了 force_exit_block_idx，则覆盖随机采样结果
+        if force_exit_layer_idx is not None:
+            exit_layer_idx = force_exit_layer_idx
+            exit_block_idx = force_exit_block_idx
 
         # 可选：保存所有层特征（主要用于离线打标签）
         all_feats0, all_feats1 = [], []
@@ -224,6 +261,7 @@ class LocalFeatureTransformer(nn.Module):
             feat1 = feat1[:, :, :mask_h1, :mask_w1]
             feature_cropped = True
 
+        # ====== 2. 逐层 Transformer 前向 ======
         for i, (layer, name) in enumerate(zip(self.layers, self.layer_names)):
             if feature_cropped:
                 mask0, mask1 = None, None
@@ -242,27 +280,28 @@ class LocalFeatureTransformer(nn.Module):
                 all_feats0.append(feat0)
                 all_feats1.append(feat1)
 
-            # 训练 + random-exit 时，在采样到的 cross 层后直接退出
+            # 训练 + random-exit 或 Stage-1.5 强制退出时，在目标 cross 层后直接退出
             if exit_layer_idx is not None and i == exit_layer_idx:
                 break
 
-        # 若需要，把所有层的 coarse 特征挂到 data 上（主要用于离线打标签脚本）
+        # ====== 3. 若需要，把所有层的 coarse 特征挂到 data 上（主要用于离线打标签脚本） ======
         if self.save_all_layers and data is not None:
             data['coarse_feats0_all'] = all_feats0
             data['coarse_feats1_all'] = all_feats1
 
-        # 同样把这次选中的 exit 信息记下来（如果有的话）
+        # ====== 4. 记录这次选中的 exit 信息 ======
         if data is not None:
             if exit_layer_idx is not None:
                 data['coarse_exit_layer_idx'] = exit_layer_idx
                 if exit_block_idx is not None:
                     data['coarse_exit_block_idx'] = exit_block_idx
             else:
-                # eval 或未开启 random_exit：统一用最后一层
+                # eval 或未开启 random_exit & 未指定 force_exit：统一用最后一层
                 data['coarse_exit_layer_idx'] = len(self.layer_names) - 1
 
+        # ====== 5. 若有裁剪，padding 回原尺寸 ======
         if feature_cropped:
-            # padding feature 回原尺寸
+            # padding feat0
             bs, c, mask_h0, mask_w0 = feat0.size()
             if mask_h0 != H0:
                 feat0 = torch.cat(
@@ -279,6 +318,7 @@ class LocalFeatureTransformer(nn.Module):
                     dim=-1
                 )
 
+            # padding feat1
             bs, c, mask_h1, mask_w1 = feat1.size()
             if mask_h1 != H1:
                 feat1 = torch.cat(
