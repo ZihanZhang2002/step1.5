@@ -17,7 +17,7 @@ main_cfg_path="configs/loftr/eloftr_full.py"
 ckpt_path="weights/random_exit_teacher.ckpt"
 
 # ✅ 输出的标签文件路径
-dump_path="dump/exit_labels_megadepth_train.npz"
+dump_path="dump/exit_perpair_perlayer_auc_megadepth_train.npz"
 
 ########################
 # Hardware & dataloader

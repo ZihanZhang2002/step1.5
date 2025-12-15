@@ -44,7 +44,9 @@ def symmetric_epipolar_distance(pts0, pts1, E, K0, K1):
     p1Ep0 = torch.sum(pts1 * Ep0, -1)  # [N,]
     Etp1 = pts1 @ E  # [N, 3]
 
-    d = p1Ep0**2 * (1.0 / (Ep0[:, 0]**2 + Ep0[:, 1]**2) + 1.0 / (Etp1[:, 0]**2 + Etp1[:, 1]**2))  # N
+    d = p1Ep0**2 * (
+        (1.0 / (Ep0[:, 0]**2 + Ep0[:, 1]**2)) + (1.0 / (Etp1[:, 0]**2 + Etp1[:, 1]**2))
+    )  # N
     return d
 
 
@@ -64,7 +66,10 @@ def compute_symmetrical_epipolar_errors(data):
     for bs in range(Tx.size(0)):
         mask = m_bids == bs
         epi_errs.append(
-            symmetric_epipolar_distance(pts0[mask], pts1[mask], E_mat[bs], data['K0'][bs], data['K1'][bs]))
+            symmetric_epipolar_distance(
+                pts0[mask], pts1[mask], E_mat[bs], data['K0'][bs], data['K1'][bs]
+            )
+        )
     epi_errs = torch.cat(epi_errs, dim=0)
 
     data.update({'epi_errs': epi_errs})
@@ -82,7 +87,9 @@ def estimate_pose(kpts0, kpts1, K0, K1, thresh, conf=0.99999):
 
     # compute pose with cv2
     E, mask = cv2.findEssentialMat(
-        kpts0, kpts1, np.eye(3), threshold=ransac_thr, prob=conf, method=cv2.RANSAC)
+        kpts0, kpts1, np.eye(3),
+        threshold=ransac_thr, prob=conf, method=cv2.RANSAC
+    )
     if E is None:
         print("\nE is None while trying to recover pose.\n")
         return None
@@ -114,36 +121,58 @@ def estimate_lo_pose(kpts0, kpts1, K0, K1, thresh, conf=0.99999):
             "max_epipolar_error": thresh,
         },
     )
-    success = M is not None and ( ((M.t != [0., 0., 0.]).all()) or ((M.q != [1., 0., 0., 0.]).all()) )
+    success = M is not None and ((((M.t != [0., 0., 0.]).all()) or ((M.q != [1., 0., 0., 0.]).all())))
     if success:
-        M = Pose.from_Rt(torch.tensor(M.R), torch.tensor(M.t)) # .to(pts0)
-        # print(M)
+        M = Pose.from_Rt(torch.tensor(M.R), torch.tensor(M.t))
     else:
-        M = Pose.from_4x4mat(torch.eye(4).numpy()) # .to(pts0)
-        # print(M)
+        M = Pose.from_4x4mat(torch.eye(4).numpy())
 
     estimation = {
         "success": success,
         "M_0to1": M,
-        "inliers": torch.tensor(info.pop("inliers")), # .to(pts0),
+        "inliers": torch.tensor(info.pop("inliers")),
         **info,
     }
     return estimation
+
+
+# ===========================
+# NEW helpers (per-pair / per-image)
+# ===========================
+
+def _pose_err_from_rt(R_err_deg: float, t_err_deg: float) -> float:
+    """LoFTR evaluation uses max(R_err, t_err) as the final pose error."""
+    return float(max(R_err_deg, t_err_deg))
+
+
+def _succ_from_pose_err(pose_err_deg: float, thresholds=(5, 10, 20)):
+    """Return dict: {'succ@5':0/1, 'succ@10':0/1, 'succ@20':0/1}."""
+    return {f"succ@{thr}": float(pose_err_deg < thr) for thr in thresholds}
 
 
 def compute_pose_errors(data, config):
     """ 
     Update:
         data (dict):{
-            "R_errs" List[float]: [N]
-            "t_errs" List[float]: [N]
-            "inliers" List[np.ndarray]: [N]
+            "R_errs": List[List[float]]  # per pair: list over eval trials
+            "t_errs": List[List[float]]
+            "inliers": List[np.ndarray]
+            ---- NEW (per pair, using trial-0) ----
+            "pose_errs": List[float]      # per pair scalar (max(R,t))
+            "succ@5": List[float]
+            "succ@10": List[float]
+            "succ@20": List[float]
         }
     """
     pixel_thr = config.TRAINER.RANSAC_PIXEL_THR  # 0.5
     conf = config.TRAINER.RANSAC_CONF  # 0.99999
     RANSAC = config.TRAINER.POSE_ESTIMATION_METHOD
+
+    # original outputs
     data.update({'R_errs': [], 't_errs': [], 'inliers': []})
+
+    # NEW per-pair outputs (match your “per layer per img”需求)
+    data.update({'pose_errs': [], 'succ@5': [], 'succ@10': [], 'succ@20': []})
 
     m_bids = data['m_bids'].cpu().numpy()
     pts0 = data['mkpts0_f'].cpu().numpy()
@@ -154,19 +183,21 @@ def compute_pose_errors(data, config):
 
     for bs in range(K0.shape[0]):
         mask = m_bids == bs
+
         if config.LOFTR.EVAL_TIMES >= 1:
             bpts0, bpts1 = pts0[mask], pts1[mask]
             R_list, T_list, inliers_list = [], [], []
-            # for _ in range(config.LOFTR.EVAL_TIMES):
-            for _ in range(5):
+
+            # NOTE: 你原代码这里写死 range(5)，但只用前 EVAL_TIMES 次
+            for trial in range(5):
                 shuffling = np.random.permutation(np.arange(len(bpts0)))
-                if _ >= config.LOFTR.EVAL_TIMES:
+                if trial >= config.LOFTR.EVAL_TIMES:
                     continue
-                bpts0 = bpts0[shuffling]
-                bpts1 = bpts1[shuffling]
-                
+                bpts0_ = bpts0[shuffling]
+                bpts1_ = bpts1[shuffling]
+
                 if RANSAC == 'RANSAC':
-                    ret = estimate_pose(bpts0, bpts1, K0[bs], K1[bs], pixel_thr, conf=conf)
+                    ret = estimate_pose(bpts0_, bpts1_, K0[bs], K1[bs], pixel_thr, conf=conf)
                     if ret is None:
                         R_list.append(np.inf)
                         T_list.append(np.inf)
@@ -179,7 +210,7 @@ def compute_pose_errors(data, config):
                         inliers_list.append(inliers)
 
                 elif RANSAC == 'LO-RANSAC':
-                    est = estimate_lo_pose(bpts0, bpts1, K0[bs], K1[bs], pixel_thr, conf=conf)
+                    est = estimate_lo_pose(bpts0_, bpts1_, K0[bs], K1[bs], pixel_thr, conf=conf)
                     if not est["success"]:
                         R_list.append(90)
                         T_list.append(90)
@@ -196,7 +227,30 @@ def compute_pose_errors(data, config):
 
             data['R_errs'].append(R_list)
             data['t_errs'].append(T_list)
-            data['inliers'].append(inliers_list[0])
+            data['inliers'].append(inliers_list[0] if len(inliers_list) > 0 else np.array([]).astype(bool))
+
+            # ===== NEW: per-pair scalar based on trial-0 (与你现在 aggregate 的 inliers 取法一致) =====
+            if len(R_list) > 0 and len(T_list) > 0:
+                pose_err = _pose_err_from_rt(R_list[0], T_list[0])
+            else:
+                pose_err = float('inf')
+
+            data['pose_errs'].append(pose_err)
+            succ = _succ_from_pose_err(pose_err, thresholds=(5, 10, 20))
+            data['succ@5'].append(succ['succ@5'])
+            data['succ@10'].append(succ['succ@10'])
+            data['succ@20'].append(succ['succ@20'])
+
+        else:
+            # 保持原行为：如果你真的把 EVAL_TIMES 设成 0
+            # 那这里就不做 pose 评估
+            data['R_errs'].append([np.inf])
+            data['t_errs'].append([np.inf])
+            data['inliers'].append(np.array([]).astype(bool))
+            data['pose_errs'].append(float('inf'))
+            data['succ@5'].append(0.0)
+            data['succ@10'].append(0.0)
+            data['succ@20'].append(0.0)
 
 
 # --- METRIC AGGREGATION ---
@@ -211,10 +265,10 @@ def error_auc(errors, thresholds):
     recall = list(np.linspace(0, 1, len(errors)))
 
     aucs = []
-    thresholds = [5, 10, 20]
+    thresholds = [5, 10, 20]  # keep original behavior
     for thr in thresholds:
         last_index = np.searchsorted(errors, thr)
-        y = recall[:last_index] + [recall[last_index-1]]
+        y = recall[:last_index] + [recall[last_index - 1]]
         x = errors[:last_index] + [thr]
         aucs.append(np.trapz(y, x) / thr)
 
@@ -250,15 +304,25 @@ def aggregate_metrics(metrics, epi_err_thr=5e-4, config=None):
     angular_thresholds = [5, 10, 20]
 
     if config.LOFTR.EVAL_TIMES >= 1:
-        pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0).reshape(-1, config.LOFTR.EVAL_TIMES)[unq_ids].reshape(-1)
+        pose_errors = np.max(
+            np.stack([metrics['R_errs'], metrics['t_errs']]),
+            axis=0
+        ).reshape(-1, config.LOFTR.EVAL_TIMES)[unq_ids].reshape(-1)
     else:
         pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0)[unq_ids]
     aucs = error_auc(pose_errors, angular_thresholds)  # (auc@5, auc@10, auc@20)
 
     # matching precision
     dist_thresholds = [epi_err_thr]
-    precs = epidist_prec(np.array(metrics['epi_errs'], dtype=object)[unq_ids], dist_thresholds, True)  # (prec@err_thr)
-    
+    precs = epidist_prec(
+        np.array(metrics['epi_errs'], dtype=object)[unq_ids],
+        dist_thresholds,
+        True
+    )
+
     u_num_mathces = np.array(metrics['num_matches'], dtype=object)[unq_ids]
-    num_matches = {f'num_matches': u_num_mathces.mean() }
+    num_matches = {'num_matches': u_num_mathces.mean()}
+
+    # NOTE: 不把 succ@5/10/20 加到 aggregate 里也完全没问题（你说只看 AUC 就行）
+    # 但你现在能在 batch/data 级别拿到 pose_errs / succ@thr，用于 step1.5 per-layer per-image。
     return {**aucs, **precs, **num_matches}
